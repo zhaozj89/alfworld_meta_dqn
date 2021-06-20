@@ -5,6 +5,7 @@ import json
 import pathlib
 import numpy as np
 # from tqdm import tqdm
+import pdb
 import sys
 
 import alfworld.agents.environment
@@ -15,7 +16,7 @@ from alfworld.agents.modules.generic import HistoryScoreCache, EpisodicCountingM
 from alfworld.agents.utils.misc import extract_admissible_commands
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ['CUDA_VISIBLE_DEVICES']='2'
+os.environ['CUDA_VISIBLE_DEVICES']='0'
 
 
 def train():
@@ -28,42 +29,28 @@ def train():
     agent = TextDQNAgent(config)
 
     env_type = config["env"]["type"]
-    id_eval_env, num_id_eval_game = None, 0
-    ood_eval_env, num_ood_eval_game = None, 0
+    env, num_game = None, 0
 
-    alfred_env = getattr(alfworld.agents.environment, config["env"]["type"])(config, train_eval="train")
-    env = alfred_env.init_env(batch_size=agent.batch_size)
-
-    if agent.run_eval:
+    if config["general"]["evaluate"]["run_in"]:
         # in distribution
-        if config['dataset']['eval_id_data_path'] is not None:
-            alfred_env = getattr(alfworld.agents.environment, config["general"]["evaluate"]["env"]["type"])(config, train_eval="eval_in_distribution")
-            id_eval_env = alfred_env.init_env(batch_size=agent.eval_batch_size)
-            num_id_eval_game = alfred_env.num_games
+        alfred_env = getattr(alfworld.agents.environment, config["general"]["evaluate"]["env"]["type"])(config, train_eval="eval_in_distribution")
+        env = alfred_env.init_env(batch_size=agent.eval_batch_size)
+        num_game = alfred_env.num_games
+    else:
         # out of distribution
-        if config['dataset']['eval_ood_data_path'] is not None:
-            alfred_env = getattr(alfworld.agents.environment, config["general"]["evaluate"]["env"]["type"])(config, train_eval="eval_out_of_distribution")
-            ood_eval_env = alfred_env.init_env(batch_size=agent.eval_batch_size)
-            num_ood_eval_game = alfred_env.num_games
+        alfred_env = getattr(alfworld.agents.environment, config["general"]["evaluate"]["env"]["type"])(config, train_eval="eval_out_of_distribution")
+        env = alfred_env.init_env(batch_size=agent.eval_batch_size)
+        num_game = alfred_env.num_games
 
-    # output_dir = config["general"]["save_path"]
-    # data_dir = config["general"]["save_path"]
-    output_dir = './dqn'
-    data_dir = './dqn'
+    save_dir = config["general"]["save_path"]
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # visdom
-    if config["general"]["visdom"]:
-        import visdom
-        viz = visdom.Visdom()
-        reward_win, step_win = None, None
-        dqn_loss_win = None
-        viz_game_points, viz_step, viz_overall_rewards = [], [], []
-        viz_id_eval_game_points, viz_id_eval_step = [], []
-        viz_ood_eval_game_points, viz_ood_eval_step = [], []
-        viz_dqn_loss = []
+    # load model from checkpoint
+    if agent.load_pretrained:
+        if os.path.exists(save_dir + "/" + agent.load_from_tag + ".pt"):
+            agent.load_pretrained_model(save_dir + "/" + agent.load_from_tag + ".pt")
+            agent.update_target_net()
+        else:
+            raise ValueError
 
     step_in_total = 0
     episode_no = 0
@@ -72,16 +59,16 @@ def train():
     running_avg_game_steps = HistoryScoreCache(capacity=500)
     running_avg_dqn_loss = HistoryScoreCache(capacity=500)
 
-    json_file_name = agent.experiment_tag.replace(" ", "_")
-    best_performance_so_far, best_ood_performance_so_far = 0.0, 0.0
+    json_file_name = 'result_out'
     episodic_counting_memory = EpisodicCountingMemory()  # episodic counting based memory
     obj_centric_episodic_counting_memory = ObjCentricEpisodicMemory()
 
+    # pdb.set_trace()
     while(True):
-        if episode_no > agent.max_episode:
+        if episode_no >= 20:
             break
-        # else:
-        #     print('training in {}/{} episode ... ...'.format(episode_no, agent.max_episode))
+        else:
+            print('training in {}/{} episode ... ...'.format(episode_no, agent.max_episode))
 
         np.random.seed(episode_no)
         env.seed(episode_no)
@@ -155,7 +142,7 @@ def train():
             if agent.noisy_net and step_in_total % agent.update_per_k_game_steps == 0:
                 agent.reset_noise()  # Draw a new set of noisy weights
 
-            if episode_no >= agent.learn_start_from_this_episode and step_in_total % agent.update_per_k_game_steps == 0:
+            if episode_no >= 1 and step_in_total % agent.update_per_k_game_steps == 0: #agent.learn_start_from_this_episode and step_in_total % agent.update_per_k_game_steps == 0:
                 dqn_loss, _ = agent.update_dqn()
                 if dqn_loss is not None:
                     running_avg_dqn_loss.push(dqn_loss)
@@ -182,11 +169,13 @@ def train():
             if np.sum(still_running) == 0:
                 break
 
+        # pdb.set_trace()
         still_running_mask_np = np.array(still_running_mask)
         game_rewards_np = np.array(sequence_game_rewards) * still_running_mask_np  # step x batch
         count_rewards_np = np.array(sequence_count_rewards) * still_running_mask_np  # step x batch
         novel_object_rewards_np = np.array(sequence_novel_object_rewards) * still_running_mask_np
         game_points_np = np.array(sequence_game_points) * still_running_mask_np  # step x batch
+        # pdb.set_trace()
         game_rewards_pt = generic.to_pt(game_rewards_np, enable_cuda=False, type='float')  # step x batch
         count_rewards_pt = generic.to_pt(count_rewards_np, enable_cuda=False, type='float')  # step x batch
         novel_object_rewards_pt = generic.to_pt(novel_object_rewards_np, enable_cuda=False, type='float')
@@ -230,129 +219,21 @@ def train():
 
         # finish game
         agent.finish_of_episode(episode_no, batch_size)
-        episode_no += batch_size
+        episode_no += 1 #batch_size
 
-        if episode_no < agent.learn_start_from_this_episode:
-            continue
-        if agent.report_frequency == 0 or (episode_no % agent.report_frequency > (episode_no - batch_size) % agent.report_frequency):
-            continue
         time_2 = datetime.datetime.now()
         # print("Episode: {:3d} | time spent: {:s} | dqn loss: {:2.3f} | overall rewards: {:2.3f}/{:2.3f} | game points: {:2.3f}/{:2.3f} | used steps: {:2.3f}/{:2.3f}".format(episode_no, str(time_2 - time_1).rsplit(".")[0], running_avg_dqn_loss.get_avg(), np.mean(np.sum(game_rewards_np, 0) + np.sum(count_rewards_np, 0) + np.sum(novel_object_rewards_np, 0)), running_avg_overall_rewards.get_avg(), np.mean(np.sum(game_points_np, 0)), running_avg_game_points.get_avg(), np.mean(np.sum(still_running_mask_np, 0)), running_avg_game_steps.get_avg()))
-        # print(game_id + ":    " + " | ".join(print_actions))
-        # print(" | ".join(print_actions))
-
-        # evaluate
-        id_eval_game_points, id_eval_game_step = 0.0, 0.0
-        ood_eval_game_points, ood_eval_game_step = 0.0, 0.0
-        if agent.run_eval:
-            if id_eval_env is not None:
-                id_eval_res = evaluate_dqn(id_eval_env, agent, num_id_eval_game)
-                id_eval_game_points, id_eval_game_step = id_eval_res['average_points'], id_eval_res['average_steps']
-            if ood_eval_env is not None:
-                ood_eval_res = evaluate_dqn(ood_eval_env, agent, num_ood_eval_game)
-                ood_eval_game_points, ood_eval_game_step = ood_eval_res['average_points'], ood_eval_res['average_steps']
-            if id_eval_game_points >= best_performance_so_far:
-                best_performance_so_far = id_eval_game_points
-                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_id.pt")
-            if ood_eval_game_points >= best_ood_performance_so_far:
-                best_ood_performance_so_far = ood_eval_game_points
-                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_ood.pt")
-        else:
-            if running_avg_game_points.get_avg() >= best_performance_so_far:
-                best_performance_so_far = running_avg_game_points.get_avg()
-                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + ".pt")
-
-        # plot using visdom
-        if config["general"]["visdom"]:
-            viz_game_points.append(running_avg_game_points.get_avg())
-            viz_overall_rewards.append(running_avg_overall_rewards.get_avg())
-            viz_step.append(running_avg_game_steps.get_avg())
-            viz_dqn_loss.append(running_avg_dqn_loss.get_avg())
-            viz_id_eval_game_points.append(id_eval_game_points)
-            viz_id_eval_step.append(id_eval_game_step)
-            viz_ood_eval_game_points.append(ood_eval_game_points)
-            viz_ood_eval_step.append(ood_eval_game_step)
-            viz_x = np.arange(len(viz_game_points)).tolist()
-
-            if reward_win is None:
-                reward_win = viz.line(X=viz_x, Y=viz_game_points,
-                            opts=dict(title=agent.experiment_tag + "_game_points"),
-                        name="game points")
-                viz.line(X=viz_x, Y=viz_overall_rewards,
-                            opts=dict(title=agent.experiment_tag + "_overall_rewards"),
-                            win=reward_win, update='append', name="overall rewards")
-                viz.line(X=viz_x, Y=viz_id_eval_game_points,
-                            opts=dict(title=agent.experiment_tag + "_id_eval_game_points"),
-                            win=reward_win, update='append', name="id eval game points")
-                viz.line(X=viz_x, Y=viz_ood_eval_game_points,
-                            opts=dict(title=agent.experiment_tag + "_ood_eval_game_points"),
-                            win=reward_win, update='append', name="ood eval game points")
-            else:
-                viz.line(X=[len(viz_game_points) - 1], Y=[viz_game_points[-1]],
-                            opts=dict(title=agent.experiment_tag + "_game_points"),
-                            win=reward_win,
-                            update='append', name="game points")
-                viz.line(X=[len(viz_overall_rewards) - 1], Y=[viz_overall_rewards[-1]],
-                            opts=dict(title=agent.experiment_tag + "_overall_rewards"),
-                            win=reward_win,
-                            update='append', name="overall rewards")
-                viz.line(X=[len(viz_id_eval_game_points) - 1], Y=[viz_id_eval_game_points[-1]],
-                            opts=dict(title=agent.experiment_tag + "_id_eval_game_points"),
-                            win=reward_win,
-                            update='append', name="id eval game points")
-                viz.line(X=[len(viz_ood_eval_game_points) - 1], Y=[viz_ood_eval_game_points[-1]],
-                            opts=dict(title=agent.experiment_tag + "_ood_eval_game_points"),
-                            win=reward_win,
-                            update='append', name="ood eval game points")
-
-            if step_win is None:
-                step_win = viz.line(X=viz_x, Y=viz_step,
-                                    opts=dict(title=agent.experiment_tag + "_step"),
-                                    name="step")
-                viz.line(X=viz_x, Y=viz_id_eval_step,
-                            opts=dict(title=agent.experiment_tag + "_id_eval_step"),
-                            win=step_win, update='append', name="id eval step")
-                viz.line(X=viz_x, Y=viz_ood_eval_step,
-                            opts=dict(title=agent.experiment_tag + "_ood_eval_step"),
-                            win=step_win, update='append', name="ood eval step")
-            else:
-                viz.line(X=[len(viz_step) - 1], Y=[viz_step[-1]],
-                            opts=dict(title=agent.experiment_tag + "_step"),
-                            win=step_win,
-                            update='append', name="step")
-                viz.line(X=[len(viz_id_eval_step) - 1], Y=[viz_id_eval_step[-1]],
-                            opts=dict(title=agent.experiment_tag + "_id_eval_step"),
-                            win=step_win,
-                            update='append', name="id eval step")
-                viz.line(X=[len(viz_ood_eval_step) - 1], Y=[viz_ood_eval_step[-1]],
-                            opts=dict(title=agent.experiment_tag + "_ood_eval_step"),
-                            win=step_win,
-                            update='append', name="ood eval step")
-
-            if dqn_loss_win is None:
-                dqn_loss_win = viz.line(X=viz_x, Y=viz_dqn_loss,
-                                    opts=dict(title=agent.experiment_tag + "_dqn_loss"),
-                                    name="dqn loss")
-            else:
-                viz.line(X=[len(viz_dqn_loss) - 1], Y=[viz_dqn_loss[-1]],
-                            opts=dict(title=agent.experiment_tag + "_dqn_loss"),
-                            win=dqn_loss_win,
-                            update='append', name="dqn loss")
 
         # write accuracies down into file
         _s = json.dumps({"time spent": str(time_2 - time_1).rsplit(".")[0],
                             "dqn loss": str(running_avg_dqn_loss.get_avg()),
                             "overall rewards": str(running_avg_overall_rewards.get_avg()),
                             "train game points": str(running_avg_game_points.get_avg()),
-                            "train steps": str(running_avg_game_steps.get_avg()),
-                            "id eval game points": str(id_eval_game_points),
-                            "id eval steps": str(id_eval_game_step),
-                            "ood eval game points": str(ood_eval_game_points),
-                            "ood eval steps": str(ood_eval_game_step)})
-        with open(output_dir + "/" + json_file_name + '.json', 'a+') as outfile:
+                            "train steps": str(running_avg_game_steps.get_avg())})
+        with open(save_dir + "/" + json_file_name + '.json', 'a+') as outfile:
             outfile.write(_s + '\n')
             outfile.flush()
-    agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_final.pt")
+    agent.save_model_to_path(save_dir + "/" + agent.experiment_tag + "_final.pt")
 
 
 if __name__ == '__main__':

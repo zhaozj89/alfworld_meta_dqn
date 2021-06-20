@@ -513,6 +513,7 @@ class TextDQNAgent(BaseAgent):
 
         seq_obs, task, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates = data
         loss_list, q_value_list = [], []
+        entropy_list = []
         prev_dynamics = None
 
         h_td, td_mask = self.encode(task, use_model="online")
@@ -525,7 +526,7 @@ class TextDQNAgent(BaseAgent):
                 reward = reward.cuda()
 
             h_obs, obs_mask = self.encode(obs, use_model="online")
-            action_scores, _, current_dynamics = self.action_scoring(candidates, h_obs, obs_mask, h_td, td_mask,
+            action_scores, action_masks, current_dynamics = self.action_scoring(candidates, h_obs, obs_mask, h_td, td_mask,
                                                                      prev_dynamics, use_model="online")
             # ps_a
             chosen_indices = to_pt(chosen_indices, enable_cuda=self.use_cuda, type='long').unsqueeze(-1)
@@ -536,6 +537,12 @@ class TextDQNAgent(BaseAgent):
                 q_value = q_value.detach()
                 prev_dynamics = prev_dynamics.detach()
                 continue
+
+            action_probabilities = (action_scores + (action_masks-1)*999999).softmax(dim=-1) + 0.000001
+            logp_pi = torch.log(action_probabilities)
+            # logp_pi = torch.where(torch.isinf(logp_pi),torch.full_like(logp_pi,-999999),logp_pi)
+            entropy = torch.mean(action_probabilities*logp_pi*action_masks, dim=-1)
+            entropy_list.append(entropy)
 
             with torch.no_grad():
                 if self.noisy_net:
@@ -565,8 +572,9 @@ class TextDQNAgent(BaseAgent):
 
         loss = torch.stack(loss_list).mean()
         q_value = torch.stack(q_value_list).mean()
+        entropy_loss = torch.stack(entropy_list).mean()
 
-        return loss, q_value
+        return loss-0.5*entropy_loss, q_value
 
     def update_dqn_admissible_commands(self):
         # update neural model by replaying snapshots in replay memory
@@ -577,6 +585,16 @@ class TextDQNAgent(BaseAgent):
 
         if dqn_loss is None:
             return None, None
+        # param_with_grad = [param for param in self.online_net.parameters() if param.requires_grad]
+        # grad_params = torch.autograd.grad(dqn_loss, param_with_grad, create_graph=True, retain_graph=True, allow_unused=True)
+        # grad_norm = 0
+        # for grad in grad_params:
+        #     if grad is not None:
+        #         grad_norm += grad.pow(2).sum()
+        #     # grad_norm = grad_norm.sqrt()
+
+        # loss = dqn_loss - grad_norm
+        # loss = loss.cuda()
         # Backpropagate
         self.online_net.zero_grad()
         self.optimizer.zero_grad()
